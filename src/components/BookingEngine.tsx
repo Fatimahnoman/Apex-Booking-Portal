@@ -18,7 +18,7 @@ import {
   Building2,
 } from 'lucide-react';
 import { services, consultants, generateTimeSlots, generateReferenceId, type Service, type Consultant } from '@/lib/data';
-import { supabase, type Booking } from '@/lib/supabase';
+import { supabase, isSupabaseConfigured, type Booking } from '@/lib/supabase';
 import { useToast } from '@/components/Toast';
 
 interface BookingEngineProps {
@@ -100,9 +100,39 @@ export function BookingEngine({ open, onClose, onComplete }: BookingEngineProps)
 
       const bookingDateStr = selectedDate!.toISOString().split('T')[0];
 
-      const { data, error } = await supabase
-        .from('bookings')
-        .insert({
+      let savedData: Booking | null = null;
+
+      if (isSupabaseConfigured) {
+        const { data, error } = await supabase
+          .from('bookings')
+          .insert({
+            reference_id: ref,
+            service_name: selectedService!.name,
+            consultant: selectedConsultant!.name,
+            duration: selectedService!.duration,
+            price: selectedService!.price,
+            booking_date: bookingDateStr,
+            time_slot: selectedSlot!,
+            timezone,
+            client_name: clientName,
+            client_email: clientEmail,
+            client_phone: clientPhone || null,
+            project_requirements: requirements || null,
+            payment_method: paymentMethod,
+            status: 'confirmed',
+          })
+          .select()
+          .maybeSingle();
+
+        if (error) {
+          notify('Booking failed — please try again', 'error');
+          setSubmitting(false);
+          return;
+        }
+        savedData = data as Booking;
+      } else {
+        savedData = {
+          id: crypto.randomUUID(),
           reference_id: ref,
           service_name: selectedService!.name,
           consultant: selectedConsultant!.name,
@@ -117,17 +147,11 @@ export function BookingEngine({ open, onClose, onComplete }: BookingEngineProps)
           project_requirements: requirements || null,
           payment_method: paymentMethod,
           status: 'confirmed',
-        })
-        .select()
-        .maybeSingle();
-
-      if (error) {
-        notify('Booking failed — please try again', 'error');
-        setSubmitting(false);
-        return;
+          created_at: new Date().toISOString(),
+        };
       }
 
-      setSavedBooking(data as Booking);
+      setSavedBooking(savedData);
       notify('Slot Reserved for 10 minutes', 'success');
       setTimeout(() => notify('Invoice Generated', 'success'), 800);
       setTimeout(() => notify('Calendar Event Synced', 'success'), 1600);

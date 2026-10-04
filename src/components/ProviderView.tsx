@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Calendar, Clock, Mail, Phone, RefreshCw, X, CheckCircle2, AlertCircle, LayoutDashboard, TrendingUp } from 'lucide-react';
-import { supabase, type Booking } from '@/lib/supabase';
+import { supabase, isSupabaseConfigured, type Booking } from '@/lib/supabase';
 import { useToast } from '@/components/Toast';
 
 interface ProviderViewProps {
@@ -21,6 +21,11 @@ export function ProviderView({ open, onClose }: ProviderViewProps) {
 
   const fetchBookings = async () => {
     setLoading(true);
+    if (!isSupabaseConfigured) {
+      setBookings([]);
+      setLoading(false);
+      return;
+    }
     const { data, error } = await supabase
       .from('bookings')
       .select('*')
@@ -34,6 +39,10 @@ export function ProviderView({ open, onClose }: ProviderViewProps) {
   };
 
   const updateStatus = async (id: string, status: string) => {
+    if (!isSupabaseConfigured) {
+      notify('Database not configured', 'error');
+      return;
+    }
     const { error } = await supabase.from('bookings').update({ status }).eq('id', id);
     if (error) {
       notify('Update failed', 'error');
