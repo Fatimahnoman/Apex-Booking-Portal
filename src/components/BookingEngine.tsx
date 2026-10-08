@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
@@ -10,15 +10,33 @@ import {
   Download,
   FileText,
   Link2,
+  Loader2,
   Mail,
   Phone,
   Upload,
   User,
   Bitcoin,
   Building2,
+  X,
 } from 'lucide-react';
-import { services, consultants, generateTimeSlots, generateReferenceId, type Service, type Consultant } from '@/lib/data';
-import { supabase, isSupabaseConfigured, type Booking } from '@/lib/supabase';
+import {
+  type Service,
+  type Consultant,
+  type Booking,
+} from '@/lib/supabase';
+import {
+  fetchServices,
+  fetchConsultants,
+  getAvailabilityForDate,
+  uploadBriefFile,
+  createBooking,
+  generateReferenceId,
+  generateICSFile,
+  generateInvoicePDF,
+  downloadFile,
+  commonTimezones,
+  type TimeSlot,
+} from '@/lib/api';
 import { useToast } from '@/components/Toast';
 
 interface BookingEngineProps {
@@ -33,29 +51,63 @@ const steps = ['Service', 'Date & Time', 'Details', 'Confirmation'];
 
 export function BookingEngine({ open, onClose, onComplete }: BookingEngineProps) {
   const [step, setStep] = useState(0);
+  const [services, setServices] = useState<Service[]>([]);
+  const [consultants, setConsultants] = useState<Consultant[]>([]);
+  const [loadingData, setLoadingData] = useState(true);
   const [selectedService, setSelectedService] = useState<Service | null>(null);
   const [selectedConsultant, setSelectedConsultant] = useState<Consultant | null>(null);
   const [selectedDate, setSelectedDate] = useState<Date | null>(null);
   const [selectedSlot, setSelectedSlot] = useState<string | null>(null);
-  const [timezone, setTimezone] = useState<string>(typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone : 'UTC');
+  const [timezone, setTimezone] = useState<string>(
+    typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone : 'UTC'
+  );
   const [calendarMonth, setCalendarMonth] = useState(new Date());
   const [clientName, setClientName] = useState('');
   const [clientEmail, setClientEmail] = useState('');
   const [clientPhone, setClientPhone] = useState('');
   const [requirements, setRequirements] = useState('');
-  const [fileName, setFileName] = useState<string | null>(null);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('Instant Invoice');
-  const [bookingRef, setBookingRef] = useState('');
   const [savedBooking, setSavedBooking] = useState<Booking | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [slots, setSlots] = useState<TimeSlot[]>([]);
+  const [loadingSlots, setLoadingSlots] = useState(false);
 
   const { notify } = useToast();
 
-  const slots = useMemo(() => {
-    if (!selectedDate) return [];
-    const seed = selectedDate.getDate() + selectedDate.getMonth() * 31;
-    return generateTimeSlots(seed);
-  }, [selectedDate]);
+  useEffect(() => {
+    if (!open) return;
+    (async () => {
+      setLoadingData(true);
+      try {
+        const [svc, cons] = await Promise.all([fetchServices(), fetchConsultants()]);
+        setServices(svc);
+        setConsultants(cons);
+      } catch {
+        notify('Failed to load services', 'error');
+      }
+      setLoadingData(false);
+    })();
+  }, [open, notify]);
+
+  useEffect(() => {
+    if (!selectedDate) {
+      setSlots([]);
+      return;
+    }
+    setLoadingSlots(true);
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await getAvailabilityForDate(selectedDate);
+        if (!cancelled) setSlots(result);
+      } catch {
+        if (!cancelled) notify('Failed to load availability', 'error');
+      }
+      if (!cancelled) setLoadingSlots(false);
+    })();
+    return () => { cancelled = true; };
+  }, [selectedDate, notify]);
 
   if (!open) return null;
 
@@ -69,10 +121,10 @@ export function BookingEngine({ open, onClose, onComplete }: BookingEngineProps)
     setClientEmail('');
     setClientPhone('');
     setRequirements('');
-    setFileName(null);
+    setSelectedFile(null);
     setPaymentMethod('Instant Invoice');
-    setBookingRef('');
     setSavedBooking(null);
+    setSlots([]);
   };
 
   const handleClose = () => {
@@ -83,7 +135,7 @@ export function BookingEngine({ open, onClose, onComplete }: BookingEngineProps)
   const canProceed = () => {
     if (step === 0) return selectedService && selectedConsultant;
     if (step === 1) return selectedDate && selectedSlot;
-    if (step === 2) return clientName && clientEmail;
+    if (step === 2) return clientName.trim() && clientEmail.trim();
     return true;
   };
 
@@ -95,45 +147,25 @@ export function BookingEngine({ open, onClose, onComplete }: BookingEngineProps)
     if (step === 2) {
       setSubmitting(true);
       const ref = generateReferenceId();
-      setBookingRef(ref);
-      notify('Calendar Event Syncing...', 'info');
+      notify('Reserving your slot...', 'info');
 
       const bookingDateStr = selectedDate!.toISOString().split('T')[0];
 
-      let savedData: Booking | null = null;
-
-      if (isSupabaseConfigured) {
-        const { data, error } = await supabase
-          .from('bookings')
-          .insert({
-            reference_id: ref,
-            service_name: selectedService!.name,
-            consultant: selectedConsultant!.name,
-            duration: selectedService!.duration,
-            price: selectedService!.price,
-            booking_date: bookingDateStr,
-            time_slot: selectedSlot!,
-            timezone,
-            client_name: clientName,
-            client_email: clientEmail,
-            client_phone: clientPhone || null,
-            project_requirements: requirements || null,
-            payment_method: paymentMethod,
-            status: 'confirmed',
-          })
-          .select()
-          .maybeSingle();
-
-        if (error) {
-          notify('Booking failed — please try again', 'error');
-          setSubmitting(false);
-          return;
+      let fileUrl: string | null = null;
+      if (selectedFile) {
+        try {
+          fileUrl = await uploadBriefFile(selectedFile);
+          notify('File uploaded', 'success');
+        } catch {
+          notify('File upload failed — continuing without attachment', 'warning');
         }
-        savedData = data as Booking;
-      } else {
-        savedData = {
-          id: crypto.randomUUID(),
+      }
+
+      try {
+        const booking = await createBooking({
           reference_id: ref,
+          service_id: selectedService!.id,
+          consultant_id: selectedConsultant!.id,
           service_name: selectedService!.name,
           consultant: selectedConsultant!.name,
           duration: selectedService!.duration,
@@ -145,17 +177,18 @@ export function BookingEngine({ open, onClose, onComplete }: BookingEngineProps)
           client_email: clientEmail,
           client_phone: clientPhone || null,
           project_requirements: requirements || null,
+          file_url: fileUrl,
           payment_method: paymentMethod,
-          status: 'confirmed',
-          created_at: new Date().toISOString(),
-        };
-      }
+        });
 
-      setSavedBooking(savedData);
-      notify('Slot Reserved for 10 minutes', 'success');
-      setTimeout(() => notify('Invoice Generated', 'success'), 800);
-      setTimeout(() => notify('Calendar Event Synced', 'success'), 1600);
-      setStep(3);
+        setSavedBooking(booking);
+        notify('Slot Reserved successfully', 'success');
+        setTimeout(() => notify('Invoice Generated', 'success'), 600);
+        setTimeout(() => notify('Calendar Event Ready', 'success'), 1200);
+        setStep(3);
+      } catch {
+        notify('Booking failed — please try again', 'error');
+      }
       setSubmitting(false);
     }
   };
@@ -164,12 +197,52 @@ export function BookingEngine({ open, onClose, onComplete }: BookingEngineProps)
     if (step > 0) setStep(step - 1);
   };
 
+  const handleDownloadICS = () => {
+    if (!savedBooking) return;
+    const ics = generateICSFile({
+      reference_id: savedBooking.reference_id,
+      service_name: savedBooking.service_name,
+      consultant: savedBooking.consultant,
+      booking_date: savedBooking.booking_date,
+      time_slot: savedBooking.time_slot,
+      duration: savedBooking.duration,
+      timezone: savedBooking.timezone,
+      client_name: savedBooking.client_name,
+    });
+    downloadFile(ics, `apex-reserve-${savedBooking.reference_id}.ics`, 'text/calendar');
+    notify('Calendar file downloaded', 'success');
+  };
+
+  const handleDownloadInvoice = () => {
+    if (!savedBooking) return;
+    const url = generateInvoicePDF({
+      reference_id: savedBooking.reference_id,
+      service_name: savedBooking.service_name,
+      consultant: savedBooking.consultant,
+      booking_date: savedBooking.booking_date,
+      time_slot: savedBooking.time_slot,
+      timezone: savedBooking.timezone,
+      duration: savedBooking.duration,
+      price: Number(savedBooking.price),
+      client_name: savedBooking.client_name,
+      client_email: savedBooking.client_email,
+      client_phone: savedBooking.client_phone,
+      payment_method: savedBooking.payment_method,
+    });
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `invoice-${savedBooking.reference_id}.html`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    notify('Invoice downloaded', 'success');
+  };
+
   return (
     <div className="fixed inset-0 z-[150] flex items-center justify-center p-4 sm:p-6">
-      {/* Backdrop */}
       <div className="absolute inset-0 bg-black/70 backdrop-blur-md animate-fade-in" onClick={handleClose} />
 
-      {/* Modal */}
       <div className="relative w-full max-w-3xl max-h-[90vh] overflow-y-auto rounded-3xl border border-emerald-500/20 bg-[#0A1411]/95 backdrop-blur-2xl shadow-2xl animate-modal-in">
         {/* Header */}
         <div className="sticky top-0 z-10 flex items-center justify-between border-b border-white/10 bg-[#0A1411]/90 backdrop-blur-xl px-6 py-4 rounded-t-3xl">
@@ -186,11 +259,11 @@ export function BookingEngine({ open, onClose, onComplete }: BookingEngineProps)
             onClick={handleClose}
             className="rounded-lg border border-white/10 p-2 text-white/60 hover:text-white hover:border-emerald-500/30 transition-all"
           >
-            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+            <X className="h-5 w-5" />
           </button>
         </div>
 
-        {/* Step Progress Indicator */}
+        {/* Step Progress */}
         <div className="px-6 pt-6">
           <div className="flex items-center justify-between">
             {steps.map((label, i) => (
@@ -226,62 +299,75 @@ export function BookingEngine({ open, onClose, onComplete }: BookingEngineProps)
 
         {/* Content */}
         <div className="px-6 py-6">
-          <div key={step} className="animate-step-slide">
-            {step === 0 && (
-              <Step1Service
-                services={services}
-                consultants={consultants}
-                selectedService={selectedService}
-                setSelectedService={setSelectedService}
-                selectedConsultant={selectedConsultant}
-                setSelectedConsultant={setSelectedConsultant}
-              />
-            )}
-            {step === 1 && (
-              <Step2DateTime
-                calendarMonth={calendarMonth}
-                setCalendarMonth={setCalendarMonth}
-                selectedDate={selectedDate}
-                setSelectedDate={setSelectedDate}
-                slots={slots}
-                selectedSlot={selectedSlot}
-                setSelectedSlot={setSelectedSlot}
-                timezone={timezone}
-                setTimezone={setTimezone}
-              />
-            )}
-            {step === 2 && (
-              <Step3Details
-                clientName={clientName}
-                setClientName={setClientName}
-                clientEmail={clientEmail}
-                setClientEmail={setClientEmail}
-                clientPhone={clientPhone}
-                setClientPhone={setClientPhone}
-                requirements={requirements}
-                setRequirements={setRequirements}
-                fileName={fileName}
-                setFileName={setFileName}
-                paymentMethod={paymentMethod}
-                setPaymentMethod={setPaymentMethod}
-              />
-            )}
-            {step === 3 && savedBooking && (
-              <Step4Confirmation
-                booking={savedBooking}
-                service={selectedService!}
-                consultant={selectedConsultant!}
-                date={selectedDate!}
-                slot={selectedSlot!}
-                timezone={timezone}
-                paymentMethod={paymentMethod}
-              />
-            )}
-          </div>
+          {loadingData && step === 0 ? (
+            <div className="flex flex-col items-center justify-center py-16">
+              <Loader2 className="h-8 w-8 text-emerald-400 animate-spin mb-3" />
+              <p className="text-sm text-white/40">Loading services...</p>
+            </div>
+          ) : (
+            <div key={step} className="animate-step-slide">
+              {step === 0 && (
+                <Step1Service
+                  services={services}
+                  consultants={consultants}
+                  selectedService={selectedService}
+                  setSelectedService={setSelectedService}
+                  selectedConsultant={selectedConsultant}
+                  setSelectedConsultant={setSelectedConsultant}
+                />
+              )}
+              {step === 1 && (
+                <Step2DateTime
+                  calendarMonth={calendarMonth}
+                  setCalendarMonth={setCalendarMonth}
+                  selectedDate={selectedDate}
+                  setSelectedDate={setSelectedDate}
+                  slots={slots}
+                  loadingSlots={loadingSlots}
+                  selectedSlot={selectedSlot}
+                  setSelectedSlot={setSelectedSlot}
+                  timezone={timezone}
+                  setTimezone={setTimezone}
+                />
+              )}
+              {step === 2 && (
+                <Step3Details
+                  clientName={clientName}
+                  setClientName={setClientName}
+                  clientEmail={clientEmail}
+                  setClientEmail={setClientEmail}
+                  clientPhone={clientPhone}
+                  setClientPhone={setClientPhone}
+                  requirements={requirements}
+                  setRequirements={setRequirements}
+                  selectedFile={selectedFile}
+                  setSelectedFile={setSelectedFile}
+                  paymentMethod={paymentMethod}
+                  setPaymentMethod={setPaymentMethod}
+                  selectedService={selectedService}
+                  selectedDate={selectedDate}
+                  selectedSlot={selectedSlot}
+                />
+              )}
+              {step === 3 && savedBooking && (
+                <Step4Confirmation
+                  booking={savedBooking}
+                  service={selectedService!}
+                  consultant={selectedConsultant!}
+                  date={selectedDate!}
+                  slot={selectedSlot!}
+                  timezone={timezone}
+                  paymentMethod={paymentMethod}
+                  onDownloadICS={handleDownloadICS}
+                  onDownloadInvoice={handleDownloadInvoice}
+                />
+              )}
+            </div>
+          )}
         </div>
 
         {/* Footer */}
-        {step < 3 && (
+        {step < 3 && !loadingData && (
           <div className="sticky bottom-0 flex items-center justify-between border-t border-white/10 bg-[#0A1411]/90 backdrop-blur-xl px-6 py-4 rounded-b-3xl">
             <button
               onClick={handleBack}
@@ -306,7 +392,7 @@ export function BookingEngine({ open, onClose, onComplete }: BookingEngineProps)
             >
               {submitting ? (
                 <>
-                  <span className="h-4 w-4 border-2 border-[#060D0B]/30 border-t-[#060D0B] rounded-full animate-spin" />
+                  <Loader2 className="h-4 w-4 animate-spin" />
                   Processing...
                 </>
               ) : step === 2 ? (
@@ -333,7 +419,7 @@ export function BookingEngine({ open, onClose, onComplete }: BookingEngineProps)
               Done
             </button>
             <button
-              onClick={() => { reset(); }}
+              onClick={() => reset()}
               className="flex items-center gap-2 rounded-xl border border-white/15 px-6 py-2.5 text-sm font-semibold text-white hover:border-emerald-500/30 transition-all"
             >
               Book Another
@@ -345,32 +431,7 @@ export function BookingEngine({ open, onClose, onComplete }: BookingEngineProps)
   );
 }
 
-const commonTimezones = [
-  'UTC',
-  'America/New_York',
-  'America/Chicago',
-  'America/Denver',
-  'America/Los_Angeles',
-  'America/Toronto',
-  'America/Sao_Paulo',
-  'Europe/London',
-  'Europe/Paris',
-  'Europe/Berlin',
-  'Europe/Madrid',
-  'Europe/Moscow',
-  'Africa/Lagos',
-  'Africa/Cairo',
-  'Africa/Johannesburg',
-  'Asia/Dubai',
-  'Asia/Kolkata',
-  'Asia/Shanghai',
-  'Asia/Tokyo',
-  'Asia/Singapore',
-  'Australia/Sydney',
-  'Pacific/Auckland',
-];
-
-// ─── Step 1 ──────────────────────────────────────────────────────────────
+// ─── Step 1: Service & Specialist ─────────────────────────────────────────
 
 function Step1Service({
   services,
@@ -392,7 +453,7 @@ function Step1Service({
       <h3 className="text-lg font-bold text-white mb-1">Select Your Service</h3>
       <p className="text-sm text-white/40 mb-5">Choose a consultation type to begin</p>
 
-      <div className="grid sm:grid-cols-2 gap-3 mb-6">
+      <div className="grid sm:grid-cols-2 gap-3 mb-6 max-h-[280px] overflow-y-auto pr-1">
         {services.map((service) => {
           const isSelected = selectedService?.id === service.id;
           return (
@@ -416,7 +477,7 @@ function Step1Service({
                   </div>
                 )}
               </div>
-              <p className="text-xs text-white/50 leading-relaxed mb-3">{service.description}</p>
+              <p className="text-xs text-white/50 leading-relaxed mb-3 line-clamp-2">{service.description}</p>
               <div className="flex items-center gap-3">
                 <span className="flex items-center gap-1 text-xs text-white/60">
                   <Clock className="h-3 w-3" /> {service.duration} min
@@ -449,7 +510,7 @@ function Step1Service({
                       : 'border-white/5 bg-white/3 opacity-50 cursor-not-allowed'
                   }`}
                 >
-                  <div className={`flex h-11 w-11 items-center justify-center rounded-full bg-gradient-to-br ${consultant.avatarGradient} text-sm font-bold text-white shrink-0`}>
+                  <div className={`flex h-11 w-11 items-center justify-center rounded-full bg-gradient-to-br ${consultant.avatar_gradient} text-sm font-bold text-white shrink-0`}>
                     {consultant.initials}
                   </div>
                   <div className="text-left flex-1 min-w-0">
@@ -465,6 +526,9 @@ function Step1Service({
                 </button>
               );
             })}
+            {consultants.filter((c) => c.specialties.includes(selectedService.category)).length === 0 && (
+              <p className="text-sm text-white/40 col-span-2">No specialists available for this category yet.</p>
+            )}
           </div>
         </div>
       )}
@@ -472,7 +536,7 @@ function Step1Service({
   );
 }
 
-// ─── Step 2 ──────────────────────────────────────────────────────────────
+// ─── Step 2: Date & Time ──────────────────────────────────────────────────
 
 function Step2DateTime({
   calendarMonth,
@@ -480,6 +544,7 @@ function Step2DateTime({
   selectedDate,
   setSelectedDate,
   slots,
+  loadingSlots,
   selectedSlot,
   setSelectedSlot,
   timezone,
@@ -489,7 +554,8 @@ function Step2DateTime({
   setCalendarMonth: (d: Date) => void;
   selectedDate: Date | null;
   setSelectedDate: (d: Date) => void;
-  slots: ReturnType<typeof generateTimeSlots>;
+  slots: TimeSlot[];
+  loadingSlots: boolean;
   selectedSlot: string | null;
   setSelectedSlot: (s: string) => void;
   timezone: string;
@@ -521,7 +587,7 @@ function Step2DateTime({
   return (
     <div>
       <h3 className="text-lg font-bold text-white mb-1">Pick Date & Time</h3>
-      <p className="text-sm text-white/40 mb-5">Select an available slot from the calendar</p>
+      <p className="text-sm text-white/40 mb-5">Select an available slot — booked times are shown in real-time</p>
 
       <div className="grid lg:grid-cols-2 gap-5">
         {/* Calendar */}
@@ -591,57 +657,64 @@ function Step2DateTime({
         {/* Time slots */}
         <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
           {selectedDate ? (
-            <>
-              <div className="mb-4">
-                <div className="text-xs font-medium text-white/40 uppercase">Available Times</div>
-                <div className="text-sm font-bold text-white mt-0.5">
-                  {selectedDate.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}
+            loadingSlots ? (
+              <div className="flex flex-col items-center justify-center h-full py-12">
+                <Loader2 className="h-6 w-6 text-emerald-400 animate-spin mb-2" />
+                <p className="text-xs text-white/40">Loading real-time availability...</p>
+              </div>
+            ) : (
+              <>
+                <div className="mb-4">
+                  <div className="text-xs font-medium text-white/40 uppercase">Available Times</div>
+                  <div className="text-sm font-bold text-white mt-0.5">
+                    {selectedDate.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}
+                  </div>
                 </div>
-              </div>
 
-              <div className="space-y-4 max-h-[320px] overflow-y-auto pr-1">
-                {periods.map((period) => {
-                  const periodSlots = slots.filter((s) => s.period === period);
-                  if (periodSlots.length === 0) return null;
-                  return (
-                    <div key={period}>
-                      <div className="text-xs font-medium text-white/40 uppercase mb-2">{period}</div>
-                      <div className="grid grid-cols-3 gap-2">
-                        {periodSlots.map((slot) => {
-                          const isSelected = selectedSlot === slot.label;
-                          const isBooked = slot.status === 'booked';
-                          const isRecommended = slot.status === 'recommended';
-                          return (
-                            <button
-                              key={slot.label}
-                              disabled={isBooked}
-                              onClick={() => setSelectedSlot(slot.label)}
-                              className={`relative rounded-lg px-2 py-2.5 text-xs font-medium transition-all ${
-                                isSelected
-                                  ? 'bg-emerald-400 text-[#060D0B] shadow-lg shadow-emerald-500/30'
-                                  : isBooked
-                                  ? 'bg-white/3 text-white/20 cursor-not-allowed line-through'
-                                  : isRecommended
-                                  ? 'border border-cyan-500/40 bg-cyan-500/10 text-cyan-300 hover:bg-cyan-500/20'
-                                  : 'border border-white/10 bg-white/5 text-white/70 hover:border-emerald-500/30 hover:bg-emerald-500/10'
-                              }`}
-                            >
-                              {slot.label}
-                              {isRecommended && !isSelected && (
-                                <span className="absolute -top-1.5 -right-1.5 flex h-3 w-3">
-                                  <span className="absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75 animate-ping" />
-                                  <span className="relative inline-flex h-3 w-3 rounded-full bg-cyan-400" />
-                                </span>
-                              )}
-                            </button>
-                          );
-                        })}
+                <div className="space-y-4 max-h-[320px] overflow-y-auto pr-1">
+                  {periods.map((period) => {
+                    const periodSlots = slots.filter((s) => s.period === period);
+                    if (periodSlots.length === 0) return null;
+                    return (
+                      <div key={period}>
+                        <div className="text-xs font-medium text-white/40 uppercase mb-2">{period}</div>
+                        <div className="grid grid-cols-3 gap-2">
+                          {periodSlots.map((slot) => {
+                            const isSelected = selectedSlot === slot.label;
+                            const isBooked = slot.status === 'booked';
+                            const isRecommended = slot.status === 'recommended';
+                            return (
+                              <button
+                                key={slot.label}
+                                disabled={isBooked}
+                                onClick={() => setSelectedSlot(slot.label)}
+                                className={`relative rounded-lg px-2 py-2.5 text-xs font-medium transition-all ${
+                                  isSelected
+                                    ? 'bg-emerald-400 text-[#060D0B] shadow-lg shadow-emerald-500/30'
+                                    : isBooked
+                                    ? 'bg-white/3 text-white/20 cursor-not-allowed line-through'
+                                    : isRecommended
+                                    ? 'border border-cyan-500/40 bg-cyan-500/10 text-cyan-300 hover:bg-cyan-500/20'
+                                    : 'border border-white/10 bg-white/5 text-white/70 hover:border-emerald-500/30 hover:bg-emerald-500/10'
+                                }`}
+                              >
+                                {slot.label}
+                                {isRecommended && !isSelected && (
+                                  <span className="absolute -top-1.5 -right-1.5 flex h-3 w-3">
+                                    <span className="absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75 animate-ping" />
+                                    <span className="relative inline-flex h-3 w-3 rounded-full bg-cyan-400" />
+                                  </span>
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
                       </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </>
+                    );
+                  })}
+                </div>
+              </>
+            )
           ) : (
             <div className="flex flex-col items-center justify-center h-full text-center py-12">
               <Calendar className="h-10 w-10 text-white/20 mb-3" />
@@ -654,7 +727,7 @@ function Step2DateTime({
   );
 }
 
-// ─── Step 3 ──────────────────────────────────────────────────────────────
+// ─── Step 3: Details ──────────────────────────────────────────────────────
 
 function Step3Details({
   clientName,
@@ -665,10 +738,13 @@ function Step3Details({
   setClientPhone,
   requirements,
   setRequirements,
-  fileName,
-  setFileName,
+  selectedFile,
+  setSelectedFile,
   paymentMethod,
   setPaymentMethod,
+  selectedService,
+  selectedDate,
+  selectedSlot,
 }: {
   clientName: string;
   setClientName: (s: string) => void;
@@ -678,21 +754,36 @@ function Step3Details({
   setClientPhone: (s: string) => void;
   requirements: string;
   setRequirements: (s: string) => void;
-  fileName: string | null;
-  setFileName: (s: string | null) => void;
+  selectedFile: File | null;
+  setSelectedFile: (f: File | null) => void;
   paymentMethod: PaymentMethod;
   setPaymentMethod: (m: PaymentMethod) => void;
+  selectedService: Service | null;
+  selectedDate: Date | null;
+  selectedSlot: string | null;
 }) {
   const payments: { method: PaymentMethod; icon: typeof CreditCard; label: string }[] = [
     { method: 'Credit Card', icon: CreditCard, label: 'Credit Card' },
     { method: 'Instant Invoice', icon: FileText, label: 'Instant Invoice' },
-    { method: 'Crypto Payment', icon: Bitcoin, label: 'Crypto Payment' },
+    { method: 'Crypto Payment', icon: Bitcoin, label: 'Crypto' },
   ];
 
   return (
     <div>
       <h3 className="text-lg font-bold text-white mb-1">Your Details</h3>
       <p className="text-sm text-white/40 mb-5">Tell us about you and your project</p>
+
+      {/* Summary */}
+      {selectedService && selectedDate && selectedSlot && (
+        <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-3 mb-4 flex items-center gap-3 text-xs">
+          <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
+          <span className="text-white/70">
+            <span className="font-semibold text-white">{selectedService.name}</span> — {' '}
+            {selectedDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} at {selectedSlot} — {' '}
+            <span className="text-emerald-400 font-bold">${selectedService.price}</span>
+          </span>
+        </div>
+      )}
 
       <div className="grid sm:grid-cols-2 gap-4 mb-4">
         <div>
@@ -752,13 +843,23 @@ function Step3Details({
         <label className="text-xs font-medium text-white/50 mb-1.5 block">Attach File / Brief</label>
         <label className="flex items-center gap-3 rounded-xl border border-dashed border-white/15 bg-white/5 px-4 py-3 cursor-pointer hover:border-emerald-500/30 transition-colors">
           <Upload className="h-4 w-4 text-white/40" />
-          <span className="text-sm text-white/50 flex-1">
-            {fileName || 'Click to upload a brief or document'}
+          <span className="text-sm text-white/50 flex-1 truncate">
+            {selectedFile ? selectedFile.name : 'Click to upload a brief or document (PDF, DOC, images)'}
           </span>
+          {selectedFile && (
+            <button
+              type="button"
+              onClick={(e) => { e.preventDefault(); setSelectedFile(null); }}
+              className="text-white/40 hover:text-red-400"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
           <input
             type="file"
             className="hidden"
-            onChange={(e) => setFileName(e.target.files?.[0]?.name || null)}
+            accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg"
+            onChange={(e) => setSelectedFile(e.target.files?.[0] || null)}
           />
         </label>
       </div>
@@ -786,7 +887,7 @@ function Step3Details({
   );
 }
 
-// ─── Step 4 ──────────────────────────────────────────────────────────────
+// ─── Step 4: Confirmation ─────────────────────────────────────────────────
 
 function Step4Confirmation({
   booking,
@@ -796,6 +897,8 @@ function Step4Confirmation({
   slot,
   timezone,
   paymentMethod,
+  onDownloadICS,
+  onDownloadInvoice,
 }: {
   booking: Booking;
   service: Service;
@@ -804,17 +907,15 @@ function Step4Confirmation({
   slot: string;
   timezone: string;
   paymentMethod: PaymentMethod;
+  onDownloadICS: () => void;
+  onDownloadInvoice: () => void;
 }) {
-  const total = service.price;
-  const tax = total * 0.0;
-  const grandTotal = total + tax;
+  const total = Number(booking.price);
 
   return (
     <div>
-      {/* Confetti */}
       <ConfettiBurst />
 
-      {/* Checkmark */}
       <div className="flex flex-col items-center mb-6">
         <div className="relative flex h-20 w-20 items-center justify-center rounded-full bg-gradient-to-br from-emerald-400 to-teal-500 shadow-2xl shadow-emerald-500/40 animate-bounce-in">
           <Check className="h-10 w-10 text-[#060D0B]" strokeWidth={3} />
@@ -843,6 +944,7 @@ function Step4Confirmation({
           <ReceiptRow label="Time" value={`${slot} (${timezone})`} />
           <ReceiptRow label="Duration" value={`${service.duration} minutes`} />
           <ReceiptRow label="Payment" value={paymentMethod} />
+          {booking.file_url && <ReceiptRow label="Attachment" value="Uploaded" />}
         </div>
 
         <div className="border-t border-white/10 mt-4 pt-4 space-y-2">
@@ -852,31 +954,39 @@ function Step4Confirmation({
           </div>
           <div className="flex justify-between text-sm">
             <span className="text-white/50">Tax</span>
-            <span className="text-white font-medium">${tax.toFixed(2)}</span>
+            <span className="text-white font-medium">$0.00</span>
           </div>
           <div className="flex justify-between text-base font-bold pt-2 border-t border-white/10">
             <span className="text-white">Total</span>
-            <span className="text-emerald-400">${grandTotal.toFixed(2)}</span>
+            <span className="text-emerald-400">${total.toFixed(2)}</span>
           </div>
         </div>
       </div>
 
-      {/* Calendar buttons */}
+      {/* Calendar download buttons */}
       <div className="grid grid-cols-2 gap-3 mb-3">
-        <button className="flex items-center justify-center gap-2 rounded-xl border border-white/15 bg-white/5 px-4 py-2.5 text-sm font-medium text-white hover:border-emerald-500/30 hover:bg-emerald-500/5 transition-all">
+        <button
+          onClick={onDownloadICS}
+          className="flex items-center justify-center gap-2 rounded-xl border border-white/15 bg-white/5 px-4 py-2.5 text-sm font-medium text-white hover:border-emerald-500/30 hover:bg-emerald-500/5 transition-all"
+        >
           <Calendar className="h-4 w-4 text-emerald-400" />
-          Add to Google Calendar
+          Download .ics File
         </button>
-        <button className="flex items-center justify-center gap-2 rounded-xl border border-white/15 bg-white/5 px-4 py-2.5 text-sm font-medium text-white hover:border-emerald-500/30 hover:bg-emerald-500/5 transition-all">
+        <button
+          onClick={onDownloadICS}
+          className="flex items-center justify-center gap-2 rounded-xl border border-white/15 bg-white/5 px-4 py-2.5 text-sm font-medium text-white hover:border-emerald-500/30 hover:bg-emerald-500/5 transition-all"
+        >
           <Link2 className="h-4 w-4 text-cyan-400" />
-          Add to Outlook
+          Add to Calendar
         </button>
       </div>
 
-      {/* Download invoice */}
-      <button className="w-full flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-emerald-400 to-teal-500 px-4 py-3 text-sm font-semibold text-[#060D0B] shadow-lg shadow-emerald-500/25 hover:scale-[1.02] active:scale-95 transition-all">
+      <button
+        onClick={onDownloadInvoice}
+        className="w-full flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-emerald-400 to-teal-500 px-4 py-3 text-sm font-semibold text-[#060D0B] shadow-lg shadow-emerald-500/25 hover:scale-[1.02] active:scale-95 transition-all"
+      >
         <Download className="h-4 w-4" />
-        Download Invoice PDF
+        Download Invoice
       </button>
     </div>
   );
@@ -890,8 +1000,6 @@ function ReceiptRow({ label, value }: { label: string; value: string }) {
     </div>
   );
 }
-
-// ─── Confetti ────────────────────────────────────────────────────────────
 
 function ConfettiBurst() {
   const pieces = useMemo(
