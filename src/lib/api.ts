@@ -199,21 +199,28 @@ export async function createBooking(params: {
 }
 
 export async function updateBookingStatus(id: string, status: string): Promise<void> {
-  const { error } = await supabase.from('bookings').update({ status }).eq('id', id);
-  if (error) throw error;
+  const res = await fetch('/api/bookings', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, status }),
+  });
+  if (!res.ok) throw new Error('Failed to update booking');
 }
 
 export async function rescheduleBooking(id: string, newDate: string, newSlot: string): Promise<void> {
-  const { error } = await supabase
-    .from('bookings')
-    .update({ booking_date: newDate, time_slot: newSlot })
-    .eq('id', id);
-  if (error) throw error;
+  const res = await fetch('/api/bookings', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, booking_date: newDate, time_slot: newSlot }),
+  });
+  if (!res.ok) throw new Error('Failed to update booking');
 }
 
 export async function deleteBooking(id: string): Promise<void> {
-  const { error } = await supabase.from('bookings').delete().eq('id', id);
-  if (error) throw error;
+  const res = await fetch(`/api/bookings?id=${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error('Failed to delete booking');
 }
 
 export async function createService(service: Omit<Service, 'id' | 'created_at' | 'active'>): Promise<Service> {
@@ -227,13 +234,19 @@ export async function createService(service: Omit<Service, 'id' | 'created_at' |
 }
 
 export async function updateService(id: string, updates: Partial<Service>): Promise<void> {
-  const { error } = await supabase.from('services').update(updates).eq('id', id);
-  if (error) throw error;
+  const res = await fetch('/api/services', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, ...updates }),
+  });
+  if (!res.ok) throw new Error('Failed to update service');
 }
 
 export async function deleteService(id: string): Promise<void> {
-  const { error } = await supabase.from('services').delete().eq('id', id);
-  if (error) throw error;
+  const res = await fetch(`/api/services?id=${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error('Failed to delete service');
 }
 
 export async function createConsultant(consultant: Omit<Consultant, 'id' | 'created_at'>): Promise<Consultant> {
@@ -247,13 +260,19 @@ export async function createConsultant(consultant: Omit<Consultant, 'id' | 'crea
 }
 
 export async function updateConsultant(id: string, updates: Partial<Consultant>): Promise<void> {
-  const { error } = await supabase.from('consultants').update(updates).eq('id', id);
-  if (error) throw error;
+  const res = await fetch('/api/consultants', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, ...updates }),
+  });
+  if (!res.ok) throw new Error('Failed to update consultant');
 }
 
 export async function deleteConsultant(id: string): Promise<void> {
-  const { error } = await supabase.from('consultants').delete().eq('id', id);
-  if (error) throw error;
+  const res = await fetch(`/api/consultants?id=${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error('Failed to delete consultant');
 }
 
 export function generateICSFile(booking: {
