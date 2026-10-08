@@ -6,7 +6,8 @@ import { ServicesSection, AvailabilitySection, IntegrationSection, ContactSectio
 import { BookingEngine } from '@/components/BookingEngine';
 import { ProviderView } from '@/components/ProviderView';
 import { ToastProvider } from '@/components/Toast';
-import { LayoutDashboard } from 'lucide-react';
+import { isSupabaseConfigured } from '@/lib/supabase';
+import { LayoutDashboard, AlertTriangle } from 'lucide-react';
 
 function App() {
   const [bookingOpen, setBookingOpen] = useState(false);
@@ -22,6 +23,15 @@ function App() {
   return (
     <ToastProvider>
       <AnimatedBackground />
+
+      {!isSupabaseConfigured && (
+        <div className="fixed top-0 left-0 right-0 z-[200] bg-amber-500/90 px-4 py-2 text-center text-xs font-semibold text-black flex items-center justify-center gap-2">
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+          <span>
+            Database not connected. Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in Vercel Settings → Environment Variables, then redeploy.
+          </span>
+        </div>
+      )}
 
       <Navbar
         onBookClick={openBooking}
