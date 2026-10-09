@@ -31,9 +31,10 @@ import {
   uploadBriefFile,
   createBooking,
   generateReferenceId,
-  generateICSFile,
-  generateInvoicePDF,
-  downloadFile,
+  generateICS,
+  downloadICS,
+  generateInvoice,
+  downloadInvoice,
   commonTimezones,
   type TimeSlot,
 } from '@/lib/api';
@@ -199,43 +200,13 @@ export function BookingEngine({ open, onClose, onComplete }: BookingEngineProps)
 
   const handleDownloadICS = () => {
     if (!savedBooking) return;
-    const ics = generateICSFile({
-      reference_id: savedBooking.reference_id,
-      service_name: savedBooking.service_name,
-      consultant: savedBooking.consultant,
-      booking_date: savedBooking.booking_date,
-      time_slot: savedBooking.time_slot,
-      duration: savedBooking.duration,
-      timezone: savedBooking.timezone,
-      client_name: savedBooking.client_name,
-    });
-    downloadFile(ics, `apex-reserve-${savedBooking.reference_id}.ics`, 'text/calendar');
+    downloadICS(savedBooking);
     notify('Calendar file downloaded', 'success');
   };
 
   const handleDownloadInvoice = () => {
     if (!savedBooking) return;
-    const url = generateInvoicePDF({
-      reference_id: savedBooking.reference_id,
-      service_name: savedBooking.service_name,
-      consultant: savedBooking.consultant,
-      booking_date: savedBooking.booking_date,
-      time_slot: savedBooking.time_slot,
-      timezone: savedBooking.timezone,
-      duration: savedBooking.duration,
-      price: Number(savedBooking.price),
-      client_name: savedBooking.client_name,
-      client_email: savedBooking.client_email,
-      client_phone: savedBooking.client_phone,
-      payment_method: savedBooking.payment_method,
-    });
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `invoice-${savedBooking.reference_id}.html`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    downloadInvoice(savedBooking);
     notify('Invoice downloaded', 'success');
   };
 
